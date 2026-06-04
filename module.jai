@@ -94,6 +94,9 @@ load_asset :: (path: string) -> bool, string {
             if found return true, cached;
 
             full_path := tprint("%/%", assets.base_path, asset_path);
+            if is_absolute_path(asset_path) {
+                full_path = asset_path;
+            }
             data, ok := read_entire_file(full_path);
             if !ok return false, "";
 
