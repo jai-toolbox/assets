@@ -131,9 +131,12 @@ asset_exists :: (path: string) -> bool {
     return ok;
 }
 
-package_directory :: (source_dir: string, output_package: string) -> bool {
+Package_File_Filter :: #type (relative_path: string) -> bool;
+
+package_directory :: (source_dir: string, output_package: string, filter: Package_File_Filter = null) -> bool {
     Package_Context :: struct {
         source_dir: string;
+        filter: Package_File_Filter;
         package: Simple_Package.Create_Package;
         file_buffers: [..] string;
         success: bool = true;
@@ -141,6 +144,7 @@ package_directory :: (source_dir: string, output_package: string) -> bool {
 
     ctx: Package_Context;
     ctx.source_dir = source_dir;
+    ctx.filter = filter;
 
     defer {
         for ctx.file_buffers {
@@ -160,6 +164,16 @@ package_directory :: (source_dir: string, output_package: string) -> bool {
         if info.is_directory return;
         if info.short_name.count > 0 && info.short_name[0] == #char "." return;
 
+        relative_path := advance(info.full_name, ctx.source_dir.count);
+
+        if relative_path && (relative_path[0] == #char "/" || relative_path[0] == #char "\\") {
+            advance(*relative_path, 1);
+        }
+
+        normalize_slashes(relative_path);
+
+        if ctx.filter != null && !ctx.filter(relative_path) return;
+
         data, ok := read_entire_file(info.full_name);
         if !ok {
             log_error("Could not read asset file '%'.\n", info.full_name);
@@ -168,14 +182,6 @@ package_directory :: (source_dir: string, output_package: string) -> bool {
         }
 
         array_add(*ctx.file_buffers, data);
-
-        relative_path := advance(info.full_name, ctx.source_dir.count);
-
-        if relative_path && (relative_path[0] == #char "/" || relative_path[0] == #char "\\") {
-            advance(*relative_path, 1);
-        }
-
-        normalize_slashes(relative_path);
 
         Simple_Package.add(*ctx.package, relative_path, xx data);
     }
