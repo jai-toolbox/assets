@@ -22,6 +22,9 @@ If the mode is loose files, then that memory comes from the loose cache.
 If the mode is simple package, then it comes from the package data table.
 
 If you want to modify the data, use load_asset_copy.
+
+init_from_package_memory takes ownership of the supplied data when it
+succeeds. The caller retains ownership when it fails.
 */
 
 Simple_Package :: #import "Simple_Package";
@@ -43,26 +46,36 @@ Assets :: struct {
 assets: Assets;
 assets_initialized := false;
 
-init_from_loose_files :: (base_path: string) {
-    assets.mode = .LOOSE_FILES;
-    assets.base_path = base_path;
-    assets_initialized = true;
+#if OS != .WASM {
+    init_from_loose_files :: (base_path: string) {
+        assets.mode = .LOOSE_FILES;
+        assets.base_path = base_path;
+        assets_initialized = true;
+    }
+
+    init_from_package :: (package_path: string) -> bool {
+        data, file_ok := read_entire_file(package_path);
+        if !file_ok {
+            log_error("Could not read asset package '%'.\n", package_path);
+            return false;
+        }
+
+        ok := init_from_package_memory(data, package_path);
+        if !ok {
+            free(data);
+            return false;
+        }
+
+        return true;
+    }
 }
 
-init_from_package :: (package_path: string) -> bool {
-    data, file_ok := read_entire_file(package_path);
-    if !file_ok {
-        log_error("Could not read asset package '%'.\n", package_path);
-        return false;
-    }
-
-    ok := Simple_Package.init_from_memory(*assets.package, xx data, package_path);
-    if !ok {
-        free(data);
-        return false;
-    }
-
-    assets.package.data = xx data;
+// Initializes the asset system from a complete package already resident in
+// memory. On success, Assets owns data and releases it in deinit_assets. On
+// failure, ownership remains with the caller.
+init_from_package_memory :: (data: string, name_for_debugging := "memory package") -> bool {
+    ok := Simple_Package.init_from_memory(*assets.package, xx data, name_for_debugging);
+    if !ok return false;
 
     assets.mode = .SIMPLE_PACKAGE;
     assets.base_path = "";
@@ -90,6 +103,10 @@ load_asset :: (path: string) -> bool, string {
 
     if assets.mode == {
         case .LOOSE_FILES;
+#if OS == .WASM {
+            log_error("Loose-file assets are unavailable on the WebAssembly target.\n");
+            return false, "";
+} else {
             found, cached := table_find(*assets.loose_cache, asset_path);
             if found return true, cached;
 
@@ -104,6 +121,7 @@ load_asset :: (path: string) -> bool, string {
             table_add(*assets.loose_cache, path_copy, data);
 
             return true, data;
+}
 
         case .SIMPLE_PACKAGE;
             found, entry := table_find(*assets.package.lookup, asset_path);
@@ -131,6 +149,7 @@ asset_exists :: (path: string) -> bool {
     return ok;
 }
 
+#if OS != .WASM {
 Package_File_Filter :: #type (relative_path: string) -> bool;
 
 package_directory :: (source_dir: string, output_package: string, filter: Package_File_Filter = null) -> bool {
@@ -192,6 +211,7 @@ package_directory :: (source_dir: string, output_package: string, filter: Packag
 
     return Simple_Package.write(*ctx.package, output_package);
 }
+}
 
 normalize_slashes :: (path: string) {
     for i: 0..path.count-1 {
@@ -221,8 +241,11 @@ deinit_assets :: () {
 }
 
 #import "Basic";
-#import "File";
-#import "File_Utilities";
 #import "Hash_Table";
-#import "Pool";
 #import "String";
+
+#if OS != .WASM {
+    #import "File";
+    #import "File_Utilities";
+    #import "Pool";
+}
