@@ -43,6 +43,11 @@ Assets :: struct {
     loose_cache: Table(string, string);
 }
 
+deinit :: (using p : *Simple_Package.Load_Package) {
+    array_free(entries);
+    deinit(*lookup);
+}
+
 assets: Assets;
 assets_initialized := false;
 
@@ -96,6 +101,9 @@ normalize_asset_path :: (path: string) -> string {
 }
 
 // Returned data is borrowed. Do not free it.
+// assets are raw binary data, eg an array of u8, eg a string
+// you can then interpret that how you please.
+// maybe we should call this read_asset or somthing idk.
 load_asset :: (path: string) -> bool, string {
     assert(assets_initialized);
 
@@ -150,7 +158,89 @@ asset_exists :: (path: string) -> bool {
 }
 
 #if OS != .WASM {
+    
+// This is an acceptance filter
 Package_File_Filter :: #type (relative_path: string) -> bool;
+
+relative_path_from_directory :: (full_path: string, directory: string) -> string {
+    assert(begins_with(full_path, directory));
+
+    relative_path := copy_temporary_string(advance(full_path, directory.count));
+    if relative_path && (relative_path[0] == #char "/" || relative_path[0] == #char "\\") {
+        advance(*relative_path, 1);
+    }
+    normalize_slashes(relative_path);
+    return relative_path;
+}
+
+package_directory_is_current :: (data_path_abs: string, package_path_abs: string, filter: Package_File_Filter = null) -> bool {
+    package_data, package_read := read_entire_file(package_path_abs, log_errors = false);
+    if !package_read return false;
+
+    package: Simple_Package.Load_Package;
+    defer {
+        free(package_data);
+        deinit(*package);
+    }
+
+    if !Simple_Package.init_from_memory(*package, xx package_data, package_path_abs) {
+        return false;
+    }
+
+    // the struct that gets passed to it
+    Comparison_Context :: struct {
+        source_dir: string;
+        filter: Package_File_Filter;
+        package: *Simple_Package.Load_Package;
+        included_file_count: int;
+        matches := true;
+    }
+
+    comparison: Comparison_Context;
+    comparison.source_dir = data_path_abs;
+    comparison.filter = filter;
+    comparison.package = *package;
+
+    visitor :: (info: *File_Visit_Info, comparison: *Comparison_Context) {
+        if !comparison.matches || info.is_directory return;
+            
+        if info.short_name.count > 0 && info.short_name[0] == #char "." return;
+
+        relative_path := relative_path_from_directory(info.full_name, comparison.source_dir);
+
+        if comparison.filter != null && !comparison.filter(relative_path) return;
+        comparison.included_file_count += 1;
+
+        found, entry := table_find(*comparison.package.lookup, relative_path);
+        if !found { comparison.matches = false; return; }
+
+        source_data, source_read := read_entire_file(info.full_name);
+        if !source_read {
+            comparison.matches = false;
+            return;
+        }
+        defer free(source_data.data);
+
+        packaged_data := string.{entry.data.count, entry.data.data};
+        if source_data != packaged_data comparison.matches = false;
+    }
+
+    visit_ok := visit_files(data_path_abs, recursive = true, *comparison, visitor);
+        
+    have_same_num_files := comparison.included_file_count == package.entries.count;
+        
+    return visit_ok && comparison.matches && have_same_num_files;
+}
+
+package_directory_if_needed :: (data_path_abs: string, package_path_abs: string, filter: Package_File_Filter = null) -> bool {
+    if package_directory_is_current(data_path_abs, package_path_abs, filter) {
+        print("Asset package is up to date: %\n", package_path_abs);
+        return true;
+    }
+
+    print("Building asset package: %\n", package_path_abs);
+    return package_directory(data_path_abs, package_path_abs, filter);
+}
 
 package_directory :: (source_dir: string, output_package: string, filter: Package_File_Filter = null) -> bool {
     Package_Context :: struct {
@@ -183,13 +273,7 @@ package_directory :: (source_dir: string, output_package: string, filter: Packag
         if info.is_directory return;
         if info.short_name.count > 0 && info.short_name[0] == #char "." return;
 
-        relative_path := advance(info.full_name, ctx.source_dir.count);
-
-        if relative_path && (relative_path[0] == #char "/" || relative_path[0] == #char "\\") {
-            advance(*relative_path, 1);
-        }
-
-        normalize_slashes(relative_path);
+        relative_path := relative_path_from_directory(info.full_name, ctx.source_dir);
 
         if ctx.filter != null && !ctx.filter(relative_path) return;
 
